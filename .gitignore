@@ -1,0 +1,22 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Generated output and third-party checkouts
+results/raw_logs*_mock.jsonl
+third_party/
+
+# Papers, reports and notes stay local: README.md is the only Markdown file in the repo
+*.pdf
+*.docx
+*.md
+*.MD
+!README.md
