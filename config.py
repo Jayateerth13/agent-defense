@@ -66,6 +66,17 @@ ONLY_ALLOW_NARROW: bool = os.getenv("PROGENT_ONLY_ALLOW_NARROW", "False").lower(
 ALWAYS_ALLOWED: dict[str, tuple[list[str], bool]] = {
     "banking": (["get_most_recent_transactions"], True),  # (tool names, also allow all no-argument tools)
 }
+# --- Cost estimates ------------------------------------------------------------
+# USD per 1M tokens (input, output): OpenAI list prices, used only for cost estimates and spending caps.
+PRICES = {"gpt-4o-mini": (0.15, 0.60), "gpt-4o": (2.50, 10.00)}
+
+
+def price_for(model: str) -> tuple[float, float] | None:
+    """Prices of the longest matching model prefix (``gpt-4o-mini`` before ``gpt-4o``), or None."""
+    key = max((k for k in PRICES if model.startswith(k)), key=len, default=None)
+    return PRICES[key] if key else None
+
+
 # --- Paths -------------------------------------------------------------------
 RESULTS_DIR = ROOT / "results"
 RAW_LOGS_PATH = RESULTS_DIR / "raw_logs.jsonl"

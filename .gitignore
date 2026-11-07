@@ -12,6 +12,10 @@ __pycache__/
 
 # Generated output and third-party checkouts
 results/raw_logs*_mock.jsonl
+results/*_mock.jsonl
+results/oversight_traces/*_mock.jsonl
+# ImpossibleBench traces contain the dataset's task files (no licence): never redistribute
+results/oversight_traces/ib_*
 third_party/
 
 # Papers, reports and notes stay local: README.md is the only Markdown file in the repo

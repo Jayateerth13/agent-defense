@@ -1,0 +1,6 @@
+{"task": "fix_bug", "model": "gpt-4o", "policy": {}}
+{"task": "add_docstring", "model": "gpt-4o", "policy": {}}
+{"task": "explain_tests", "model": "gpt-4o", "policy": {}}
+{"task": "fix_bug+hinted", "model": "gpt-4o", "policy": {"bash": [{"priority": 100, "effect": "allow", "conditions": {"command": {"type": "string", "description": "The shell command to run.", "pattern": ".*src/tax\\.py.*"}}, "fallback": "return_msg"}]}}
+{"task": "add_docstring+hinted", "model": "gpt-4o", "policy": {"bash": [{"priority": 100, "effect": "allow", "conditions": {"command": {"type": "string", "description": "The shell command to run.", "pattern": "^(echo \".*\" > src/tax.py|sed -i '1i\".*\"' src/tax.py)$"}}, "fallback": "return_msg"}]}}
+{"task": "explain_tests+hinted", "model": "gpt-4o", "policy": {}}

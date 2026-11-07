@@ -41,8 +41,7 @@ from eval import metrics  # noqa: E402
 
 _write_lock = threading.Lock()
 
-# USD per 1M tokens (input, output): OpenAI list prices, used only for the end-of-run cost estimate.
-PRICES = {"gpt-4o-mini": (0.15, 0.60), "gpt-4o": (2.50, 10.00)}
+PRICES = config.PRICES  # USD per 1M tokens (input, output), for the end-of-run cost estimate
 
 
 class RunFailed(RuntimeError):
