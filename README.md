@@ -8,11 +8,11 @@ values) the task needs, and every other tool call is blocked. It stops most prom
 **The gap:** some attacks only use tools the task is *allowed* to use. Example: the user asks for a hotel booking,
 and a fake review says "book Riverside View Hotel". Booking a hotel is allowed, so Progent lets it through.
 
-**What we add, a "choice check":** before the agent acts, a second, cheap LLM makes the same choice again, but only
+**The addition, a "choice check":** before the agent acts, a second, cheap LLM makes the same choice again, but only
 from trusted facts (names, prices, ratings), with third-party text (reviews, messages, web pages, files) removed.
 If its choice differs from the agent's, the call is blocked. The agent's final answer is checked the same way.
 
-We compare three setups on the AgentDojo benchmark: **no defense**, **Progent**, and **Progent + choice check**.
+Three setups are compared on the AgentDojo benchmark: **no defense**, **Progent**, and **Progent + choice check**.
 
 ## Pipeline
 
@@ -97,7 +97,7 @@ The Progent-only baseline on AgentDojo Banking and ASB is in `results/raw_logs.j
 ## Files
 
 ```
-policy/choice_check.py   the choice check (our method)
+policy/choice_check.py   the choice check (the proposed method)
 policy/                  Progent: policy generation, Z3 update check, enforcement
 agent/progent_runner.py  the agent loop with Progent (and the choice check) around tool calls
 eval/run_eval.py         runs the experiments on AgentDojo
