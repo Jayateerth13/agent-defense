@@ -25,8 +25,8 @@ if str(ROOT) not in sys.path:
 
 import config  # noqa: E402
 
-CONDITIONS = ("no_defense", "progent")
-LABELS = {"no_defense": "No defense", "progent": "Progent (ours)"}
+CONDITIONS = ("no_defense", "progent", "progent_recheck")
+LABELS = {"no_defense": "No defense", "progent": "Progent (ours)", "progent_recheck": "Progent + choice check"}
 
 
 def run_key(r: dict) -> tuple:
@@ -80,11 +80,12 @@ def compute(records: list[dict], paired: bool = True) -> dict:
     by_id: dict[tuple, dict[str, dict]] = defaultdict(dict)
     for r in ok:
         by_id[(r["attack"], r["user_task"], r.get("injection_task"))][r["condition"]] = r
+    present = [c for c in CONDITIONS if any(c in v for v in by_id.values())]  # conditions that were actually run
     if paired:
-        by_id = {k: v for k, v in by_id.items() if all(c in v for c in CONDITIONS)}
+        by_id = {k: v for k, v in by_id.items() if all(c in v for c in present)}
 
     out: dict = {"errors": dict(errors), "paired": paired, "conditions": {}}
-    for cond in CONDITIONS:
+    for cond in present:
         runs = [v[cond] for v in by_id.values() if cond in v]
         noatk = [r for r in runs if r["attack"] == "none"]
         atk = [r for r in runs if r["attack"] != "none"]
@@ -122,10 +123,11 @@ def render_table(m: dict) -> str:
         ("Utility, under attack", "utility_under_attack"),
         ("ASR (attack success rate, lower is better)", "asr"),
     ]
-    lines = ["| Metric | " + " | ".join(LABELS[c] for c in CONDITIONS) + " |", "|---|" + "---|" * len(CONDITIONS)]
+    conds = [c for c in CONDITIONS if c in m["conditions"]]
+    lines = ["| Metric | " + " | ".join(LABELS[c] for c in conds) + " |", "|---|" + "---|" * len(conds)]
     for label, key in rows:
         cells = []
-        for cond in CONDITIONS:
+        for cond in conds:
             r = m["conditions"][cond][key]
             ci = f" [95% CI {r['ci'][0]:.0f}-{r['ci'][1]:.0f}%]" if r["n"] else ""
             cells.append(_fmt(r) + ci)
@@ -134,14 +136,15 @@ def render_table(m: dict) -> str:
 
 
 def render_injection_breakdown(m: dict) -> str:
-    ids = sorted(set().union(*[set(m["conditions"][c]["asr_by_injection_task"]) for c in CONDITIONS]))
+    conds = [c for c in CONDITIONS if c in m["conditions"]]
+    ids = sorted(set().union(*[set(m["conditions"][c]["asr_by_injection_task"]) for c in conds]))
     if not ids:
         return ""
-    lines = ["| Injection task | " + " | ".join(f"ASR {LABELS[c]}" for c in CONDITIONS) + " |",
-             "|---|" + "---|" * len(CONDITIONS)]
+    lines = ["| Injection task | " + " | ".join(f"ASR {LABELS[c]}" for c in conds) + " |",
+             "|---|" + "---|" * len(conds)]
     for i in ids:
         lines.append(f"| {i} | " + " | ".join(
-            _fmt(m["conditions"][c]["asr_by_injection_task"].get(i, {"n": 0})) for c in CONDITIONS) + " |")
+            _fmt(m["conditions"][c]["asr_by_injection_task"].get(i, {"n": 0})) for c in conds) + " |")
     return "\n".join(lines)
 
 

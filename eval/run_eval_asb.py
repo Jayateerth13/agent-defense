@@ -107,7 +107,7 @@ def execute(sc, job: Job, args, model: str) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--log", default=None)
-    ap.add_argument("--conditions", nargs="+", default=list(metrics.CONDITIONS), choices=list(metrics.CONDITIONS))
+    ap.add_argument("--conditions", nargs="+", default=["no_defense", "progent"], choices=["no_defense", "progent"])
     ap.add_argument("--phases", nargs="+", default=["attack", "utility"], choices=["attack", "utility"])
     ap.add_argument("--tasks", nargs="*", type=int, default=None, help="task indices (default all 5)")
     ap.add_argument("--attack-tools", choices=["all", "agg", "non-agg"], default="all")

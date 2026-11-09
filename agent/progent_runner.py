@@ -42,9 +42,16 @@ import llm_client
 from agent.common import base_elements
 from agent.llm import AgentLLM
 from policy import enforcer, generator
+from policy.choice_check import ChoiceChecker
 from policy.convert import always_allowed_tools, with_always_allowed
 from policy.schema import Policy, tool_arg_names, tool_arg_types, tool_specs
 from policy.smt_check import compare_policies
+
+def _default_choice_complete(system: str, user: str, temperature: float = 0.0) -> str:
+    """Backend of the choice check: the (cheap) agent model, tagged ``check`` for the cost report."""
+    return llm_client.complete(system, user, json_mode=False, tag="check", temperature=temperature,
+                               model=config.MODEL)
+
 
 BLOCK_SUFFIX = "Please try other tools or arguments and continue to finish the user task: {task}."
 
@@ -54,11 +61,20 @@ class ProgentSession:
 
     def __init__(self, user_task: str, runtime_functions: dict, complete: generator.CompleteFn | None = None,
                  task_type: str = "general", always_allowed: tuple[list[str], bool] | None = None,
-                 update_enabled: bool = True) -> None:
+                 update_enabled: bool = True, only_allow_narrow: bool | None = None,
+                 log_update_inputs: bool = False, choice_check: bool = False,
+                 choice_complete: generator.CompleteFn | None = None) -> None:
         self.user_task = user_task
         self.task_type = task_type
+        #: optional choice-consistency check (policy/choice_check.py); None => plain Progent
+        self.choice: ChoiceChecker | None = (
+            ChoiceChecker(user_task, choice_complete or _default_choice_complete) if choice_check else None)
         #: False => the policy is generated once and never updated (what the official ASB integration does)
         self.update_enabled = update_enabled
+        #: discard expansions (official SECAGENT_ONLY_ALLOW_NARROW); per session so parallel runs can differ
+        self.only_allow_narrow = config.ONLY_ALLOW_NARROW if only_allow_narrow is None else only_allow_narrow
+        #: also log what each policy update saw (calls, which were blocked, the result text)
+        self.log_update_inputs = log_update_inputs
         self.tools = generator.tools_for_llm(runtime_functions)  # what the policy LLM sees (official format)
         specs = tool_specs(runtime_functions)  # our own view, for the Z3 argument-type map
         self.arg_types = tool_arg_types(specs)
@@ -101,11 +117,16 @@ class ProgentSession:
         return f"ValidationError: {decision.message}. " + BLOCK_SUFFIX.format(task=self.user_task)
 
     # -- policy update (two-step, official) + Z3 audit ------------------------------------------
-    def after_batch(self, calls: list[dict], results: list[str]) -> None:
-        """Called once per executor step with all valid calls of the step and their (formatted) results."""
+    def after_batch(self, calls: list[dict], results: list[str], blocked: list[bool] | None = None) -> None:
+        """Called once per executor step with all valid calls of the step and their (formatted) results.
+        ``blocked[i]`` says whether call ``i`` was blocked (its result is then ``""``); logging only."""
         if not calls or not self.update_enabled:
             return
         tool, args = calls[-1]["name"], calls[-1]["args"]
+        if self.log_update_inputs:
+            self.events.append({"type": "update_input", "calls": _jsonable(calls),
+                                "blocked": list(blocked) if blocked is not None else None,
+                                "result_text": str(results)})
         try:
             generated = generator.propose_update(
                 self.user_task, self.tools, self.tool_args, self.policy, calls, str(results), self._complete)
@@ -125,7 +146,7 @@ class ProgentSession:
         ev = {"type": "update", "tool": tool, "result": diff.kind, "diff": diff.to_json(),
               "new_policy": candidate.to_json()}
         if diff.is_expansion:
-            if config.ONLY_ALLOW_NARROW:  # official SECAGENT_ONLY_ALLOW_NARROW
+            if self.only_allow_narrow:  # official SECAGENT_ONLY_ALLOW_NARROW
                 ev["approval"] = "discarded (only narrowing allowed)"
                 self.events.append(ev)
                 return
@@ -144,10 +165,12 @@ class ProgentSession:
             "final_policy": self.policy.to_json(),
             "events": self.events,
             "update_enabled": self.update_enabled,
+            "only_allow_narrow": self.only_allow_narrow,
             "n_policy_llm_calls": self.n_policy_llm_calls,
             "n_blocked": self.n_blocked,
             "n_updates": self.n_updates,
             "n_expansions": self.n_expansions,
+            "choice": self.choice.summary() if self.choice else None,
         }
 
 
@@ -165,17 +188,24 @@ class ProgentInit(BasePipelineElement):
     """Creates a fresh :class:`ProgentSession` and its initial policy for each run."""
 
     def __init__(self, complete: generator.CompleteFn | None = None, task_type: str = "general",
-                 always_allowed: tuple[list[str], bool] | None = None, update_enabled: bool = True) -> None:
+                 always_allowed: tuple[list[str], bool] | None = None, update_enabled: bool = True,
+                 only_allow_narrow: bool | None = None, log_update_inputs: bool = False,
+                 choice_check: bool = False, choice_complete: generator.CompleteFn | None = None) -> None:
+        self.choice_check = choice_check
+        self.choice_complete = choice_complete
         self.complete = complete
         self.task_type = task_type
         self.always_allowed = always_allowed
         self.update_enabled = update_enabled
+        self.only_allow_narrow = only_allow_narrow
+        self.log_update_inputs = log_update_inputs
         self.session: ProgentSession | None = None  # last session (pipelines are built per run)
 
     def query(self, query: str, runtime: FunctionsRuntime, env: Env = EmptyEnv(),
               messages: Sequence[ChatMessage] = [], extra_args: dict = {}):
         session = ProgentSession(query, runtime.functions, self.complete, self.task_type, self.always_allowed,
-                                 self.update_enabled)
+                                 self.update_enabled, self.only_allow_narrow, self.log_update_inputs,
+                                 self.choice_check, self.choice_complete)
         self.session = session
         session.init_policy()
         # NOTE: return a *new* dict; AgentDojo's default ``extra_args={}`` is shared between runs.
@@ -202,6 +232,7 @@ class ProgentToolsExecutor(BasePipelineElement):
         results = []
         upd_calls: list[dict] = []  # calls (and results) fed to the policy update, as in the official executor
         upd_results: list[str] = []
+        upd_blocked: list[bool] = []
         for tc in messages[-1]["tool_calls"]:
             # --- same validity handling as AgentDojo's ToolsExecutor ---
             if tc.function == EMPTY_FUNCTION_NAME:
@@ -228,15 +259,47 @@ class ProgentToolsExecutor(BasePipelineElement):
                 results.append(self._result(tc, "", text))
                 upd_calls.append({"name": tc.function, "args": dict(tc.args)})
                 upd_results.append("")
+                upd_blocked.append(True)
                 continue
+
+            if session.choice is not None:  # choice-consistency check, after Progent has allowed the call
+                ok, msg = session.choice.check(tc.function, _typed_args(runtime, tc.function, tc.args))
+                if not ok:
+                    results.append(self._result(tc, "", msg))
+                    upd_calls.append({"name": tc.function, "args": dict(tc.args)})
+                    upd_results.append("")
+                    upd_blocked.append(True)
+                    continue
 
             result, error = runtime.run_function(env, tc.function, tc.args)
             formatted = self.output_formatter(result)
+            if session.choice is not None and not error:
+                session.choice.record(tc.function, dict(tc.args), formatted)
             results.append(self._result(tc, formatted, error))
             upd_calls.append({"name": tc.function, "args": dict(tc.args)})
             upd_results.append(formatted)
-        session.after_batch(upd_calls, upd_results)
+            upd_blocked.append(False)
+        session.after_batch(upd_calls, upd_results, upd_blocked)
         return query, runtime, env, [*messages, *results], extra_args
+
+
+class ChoiceAnswerCheck(BasePipelineElement):
+    """After the agent loop: re-check the final answer against the sanitised facts (see ChoiceChecker)."""
+
+    def query(self, query: str, runtime: FunctionsRuntime, env: Env = EmptyEnv(),
+              messages: Sequence[ChatMessage] = [], extra_args: dict = {}):
+        session = extra_args.get("progent")
+        if session is None or session.choice is None or not messages or messages[-1]["role"] != "assistant":
+            return query, runtime, env, messages, extra_args
+        last = messages[-1]
+        if last.get("tool_calls"):
+            return query, runtime, env, messages, extra_args
+        text = " ".join(b.get("content", "") for b in (last.get("content") or []) if b.get("type") == "text")
+        replacement = session.choice.check_answer(text)
+        if replacement is None:
+            return query, runtime, env, messages, extra_args
+        new_last = {**last, "content": [text_content_block_from_string(replacement)]}
+        return query, runtime, env, [*messages[:-1], new_last], extra_args
 
 
 def _typed_args(runtime: FunctionsRuntime, tool: str, args: dict) -> dict:
@@ -257,13 +320,18 @@ def build_pipeline(
     task_type: str = "general",
     always_allowed: tuple[list[str], bool] | None = None,
     update_enabled: bool = True,
+    only_allow_narrow: bool | None = None,
+    log_update_inputs: bool = False,
+    choice_check: bool = False,
+    choice_complete: generator.CompleteFn | None = None,
 ) -> AgentPipeline:
     llm = llm or AgentLLM()
-    init = ProgentInit(complete, task_type, always_allowed, update_enabled)
+    init = ProgentInit(complete, task_type, always_allowed, update_enabled, only_allow_narrow, log_update_inputs,
+                       choice_check, choice_complete)
     loop = ToolsExecutionLoop([ProgentToolsExecutor(tool_result_to_str), llm])
     elements = base_elements(llm, system_prompt)
     # insert ProgentInit right after the user query is added, before the first LLM call
-    pipeline = AgentPipeline([*elements[:2], init, elements[2], loop])
+    pipeline = AgentPipeline([*elements[:2], init, elements[2], loop, *([ChoiceAnswerCheck()] if choice_check else [])])
     pipeline.name = getattr(llm, "name", None) or "progent"
     pipeline.progent_init = init  # type: ignore[attr-defined]
     return pipeline

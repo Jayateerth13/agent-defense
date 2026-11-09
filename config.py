@@ -65,6 +65,18 @@ ATTACK_NAME = "important_instructions"  # the only attack technique used
 ONLY_ALLOW_NARROW: bool = os.getenv("PROGENT_ONLY_ALLOW_NARROW", "False").lower() == "true"
 ALWAYS_ALLOWED: dict[str, tuple[list[str], bool]] = {
     "banking": (["get_most_recent_transactions"], True),  # (tool names, also allow all no-argument tools)
+    # Slack / Travel: the official per-suite lists (sunblaze-ucb/progent, agentdojo/run.sh + task_suite.py);
+    # unlike Banking they do NOT also allow every no-argument tool.
+    "slack": (["get_channels", "read_channel_messages", "read_inbox", "get_users_in_channel"], False),
+    "travel": ([
+        "get_user_information", "get_all_hotels_in_city", "get_hotels_prices", "get_rating_reviews_for_hotels",
+        "get_hotels_address", "get_all_restaurants_in_city", "get_cuisine_type_for_restaurants",
+        "get_restaurants_address", "get_rating_reviews_for_restaurants",
+        "get_dietary_restrictions_for_all_restaurants", "get_contact_information_for_restaurants",
+        "get_price_for_restaurants", "check_restaurant_opening_hours", "get_all_car_rental_companies_in_city",
+        "get_car_types_available", "get_rating_reviews_for_car_rental", "get_car_fuel_options",
+        "get_car_rental_address", "get_car_price_per_day", "search_calendar_events", "get_day_calendar_events",
+        "get_flight_information"], False),
 }
 # --- Paths -------------------------------------------------------------------
 RESULTS_DIR = ROOT / "results"

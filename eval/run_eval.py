@@ -53,7 +53,7 @@ def cost_report() -> str:
     """Token totals split by caller (agent / policy) and an estimated cost; shared with run_eval_asb.py."""
     t = llm_client.TOKENS
     parts, total = [], 0.0
-    for tag, model in (("agent", config.MODEL), ("policy", config.POLICY_MODEL)):
+    for tag, model in (("agent", config.MODEL), ("policy", config.POLICY_MODEL), ("check", config.MODEL)):
         i, o = t.get(f"{tag}_input", 0), t.get(f"{tag}_output", 0)
         key = max((k for k in PRICES if model.startswith(k)), key=len, default=None)
         c = (i * PRICES[key][0] + o * PRICES[key][1]) / 1e6 if key else None
@@ -97,6 +97,10 @@ def build_jobs(suite, attack, args) -> tuple[list[Job], dict, list]:
         except ValueError as e:  # user task exposes no injection vector
             skipped.append((u, i, str(e)))
     pairs = [p for p in pairs if p in injections]
+    if args.pairs_file:  # explicit selection from eval/select_pairs.py (in-scope pairs + random control)
+        sel = json.loads(Path(args.pairs_file).read_text(encoding="utf-8"))
+        wanted = {tuple(p) for p in sel["in_scope"] + sel["control"]}
+        pairs = [p for p in pairs if p in wanted]
     if args.security_subset and args.security_subset < len(pairs):
         pairs = random.Random(args.seed).sample(pairs, args.security_subset)
         pairs.sort(key=lambda p: (int(p[0].split("_")[-1]), int(p[1].split("_")[-1])))
@@ -127,8 +131,13 @@ def execute(suite, job: Job, injections: dict, args, model: str) -> dict:
         llm = ScriptedLLM(user_task, inj_task, fooled=True)
         complete = oracle_policy_complete(user_task, env)
 
-    if job.condition == "progent":
-        pipeline = progent_runner.build_pipeline(llm, complete, always_allowed=config.ALWAYS_ALLOWED.get(config.SUITE_NAME))
+    if job.condition in ("progent", "progent_recheck"):
+        from policy import choice_check
+
+        pipeline = progent_runner.build_pipeline(
+            llm, complete, always_allowed=config.ALWAYS_ALLOWED.get(config.SUITE_NAME),
+            choice_check=job.condition == "progent_recheck",
+            choice_complete=choice_check.mock_complete if args.mock else None)
     else:
         pipeline = baseline_runner.build_pipeline(llm)
 
@@ -138,7 +147,7 @@ def execute(suite, job: Job, injections: dict, args, model: str) -> dict:
         "suite": config.SUITE_NAME,
         "benchmark_version": config.BENCHMARK_VERSION,
         "model": model,
-        "policy_model": config.POLICY_MODEL if job.condition == "progent" and not args.mock else None,
+        "policy_model": config.POLICY_MODEL if job.condition != "no_defense" and not args.mock else None,
         "condition": job.condition,
         "attack": config.ATTACK_NAME if inj_task else "none",
         "user_task": job.user_task,
@@ -154,7 +163,7 @@ def execute(suite, job: Job, injections: dict, args, model: str) -> dict:
     }
     if out.error:
         rec["traceback"] = out.extra.get("traceback")
-    if job.condition == "progent":
+    if job.condition != "no_defense":
         sess = pipeline.progent_init.session  # type: ignore[attr-defined]
         rec["progent"] = sess.summary() if sess else None
     return rec
@@ -167,12 +176,15 @@ def append(path: Path, rec: dict) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--suite", default=config.SUITE_NAME, choices=["banking", "slack", "travel"],
+                    help="AgentDojo suite (default banking; other suites log to results/raw_logs_<suite>.jsonl)")
     ap.add_argument("--log", default=None, help="JSONL log path (default results/raw_logs.jsonl)")
-    ap.add_argument("--conditions", nargs="+", default=list(metrics.CONDITIONS), choices=list(metrics.CONDITIONS))
+    ap.add_argument("--conditions", nargs="+", default=["no_defense", "progent"], choices=list(metrics.CONDITIONS))
     ap.add_argument("--phases", nargs="+", default=["attack", "utility"], choices=["attack", "utility"])
     ap.add_argument("--user-tasks", nargs="*", default=None, help="subset of user task ids, e.g. user_task_0")
     ap.add_argument("--security-subset", type=int, default=None,
                     help="random subset of N (user, injection) pairs instead of all of Banking's pairs")
+    ap.add_argument("--pairs-file", default=None, help="JSON from eval/select_pairs.py: run only these pairs")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--workers", type=int, default=1, help="parallel runs (mind API rate limits)")
     ap.add_argument("--max-runs", type=int, default=None, help="debug: stop after N new runs")
@@ -182,8 +194,10 @@ def main() -> None:
     ap.add_argument("--no-summary", action="store_true")
     args = ap.parse_args()
 
+    config.SUITE_NAME = args.suite
     model = "mock" if args.mock else config.MODEL
-    log = Path(args.log) if args.log else (ROOT / "results" / ("raw_logs_mock.jsonl" if args.mock else "raw_logs.jsonl"))
+    stem = "raw_logs" if args.suite == "banking" else f"raw_logs_{args.suite}"
+    log = Path(args.log) if args.log else (ROOT / "results" / (f"{stem}_mock.jsonl" if args.mock else f"{stem}.jsonl"))
     log.parent.mkdir(parents=True, exist_ok=True)
     if not args.mock:
         llm_client.get_client()  # fail fast if there is no API key
