@@ -1,102 +1,108 @@
 ﻿# agent-defense
 
-A small, own-code implementation of **Progent** (Shi et al., 2025, programmable privilege control for LLM agents)
-on top of the `agentdojo` package, evaluated against an undefended agent on AgentDojo Banking and ASB. It is the
-baseline for research on defending AI agents.
+## What this is
+
+**Progent** is a defense for AI agents: before the agent starts, an LLM writes a list of the tools (and argument
+values) the task needs, and every other tool call is blocked. It stops most prompt-injection attacks.
+
+**The gap:** some attacks only use tools the task is *allowed* to use. Example: the user asks for a hotel booking,
+and a fake review says "book Riverside View Hotel". Booking a hotel is allowed, so Progent lets it through.
+
+**What we add, a "choice check":** before the agent acts, a second, cheap LLM makes the same choice again, but only
+from trusted facts (names, prices, ratings), with third-party text (reviews, messages, web pages, files) removed.
+If its choice differs from the agent's, the call is blocked. The agent's final answer is checked the same way.
+
+We compare three setups on the AgentDojo benchmark: **no defense**, **Progent**, and **Progent + choice check**.
+
+## Pipeline
+
+```
+user task --> policy LLM writes the allowed tools (Progent)
+                |
+agent picks a tool call
+                |
+   Progent: is this tool/argument allowed? ---- no --> blocked
+                | yes
+   Choice check: would the agent make the same choice
+   without third-party text? -------------------- no --> blocked
+                | yes
+         tool runs, result goes back to the agent
+                |
+   final answer re-checked the same way
+                |
+AgentDojo scores the run: did the user's task succeed (utility)?
+                          did the attack succeed (ASR)?
+```
+
+The choice check is in `policy/choice_check.py`. It is switched on by the `progent_recheck` condition.
 
 ## Setup
 
-Python 3.13 was used for the reported runs.
-
 ```bash
-python -m venv venv
-source venv/bin/activate      # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env          # Windows: copy .env.example .env
+cp .env.example .env        # then put your OPENAI_API_KEY in .env
 ```
 
-Put `OPENAI_API_KEY` (or `GOOGLE_API_KEY`) in `.env`. The tests and `--mock` runs need no key.
+Models: the agent is `gpt-4o-mini`, Progent's policy LLM is `gpt-4o` (set in `.env`), and the choice check uses
+`gpt-4o-mini`.
 
-## Running
+## Test (free, no API key)
 
 ```bash
-python -m pytest -q                            # 69 offline tests, no API key needed
-python eval/run_eval.py --mock --security-subset 6 --no-summary      # offline smoke test
-
-python eval/run_eval.py                        # AgentDojo Banking: 144 attack cases + 16 clean tasks, x2 conditions
-python eval/run_eval_asb.py                    # ASB financial_analyst_agent: 200 attack cases + 5 clean tasks, x2 conditions
-python eval/make_summary.py                    # rebuilds results/summary.md from the raw logs
+python -m pytest -q
+python eval/run_eval.py --mock --suite travel --pairs-file results/pairs_travel.json --phases attack --conditions no_defense progent progent_recheck --max-runs 3 --no-summary
 ```
 
-**Real runs cost money.** A Progent run on AgentDojo cost about $0.06 with `gpt-4o` as the policy LLM, so use
-`--security-subset N` to run a random sample. Runs resume from the log: anything that already finished without error
-is skipped, so `results/raw_logs.jsonl` must be moved aside to re-run those cases.
+The second line is a scripted run with fake LLMs. It checks that everything is wired up.
 
-The first ASB run clones [agiresearch/ASB](https://github.com/agiresearch/ASB) into `third_party/` (needs `git` and
-network access). On Windows, keep this repo in a folder under about 140 characters or run
-`git config --global core.longpaths true` first, because ASB has long file paths. If that clone fails, delete
-`third_party/ASB` before retrying.
+## Run (costs money)
 
-`results/summary.md` is generated locally and is not in the repo; its hand-written discussion sections are also local,
-so a fresh clone gets the tables only.
+```bash
+# 1. choose which (user task, attack) pairs to run
+python eval/select_pairs.py --suite travel --out results/pairs_travel.json
 
-Useful flags:
-
-| Flag | Effect |
-|---|---|
-| `--security-subset N` | Random subset of the attack cases (`--seed` sets the sample) |
-| `--workers K` | Parallel runs; mind rate limits |
-| `--max-errors N` | Stop after N errored runs (default 1) |
-| `--mock` | Offline run with scripted LLMs; writes to `results/raw_logs*_mock.jsonl`, never to the real logs |
-| `--no-summary` | Do not rebuild `results/summary.md` at the end |
-| `--no-update` | ASB only: no policy updates; logs to `results/raw_logs_asb_noupdate.jsonl` |
-
-## Models
-
-| Variable | Role | Default |
-|---|---|---|
-| `PROGENT_MODEL` | Agent LLM | `gpt-4o-mini` when `OPENAI_API_KEY` is set |
-| `PROGENT_POLICY_MODEL` | Policy LLM | Same as the agent model |
-
-Set `PROGENT_POLICY_MODEL=gpt-4o`, as `.env.example` does: it matches the official code, and in a probe the mini models
-returned empty policies. Only one client is created, so both models must come from the same provider. See `config.py`
-for the remaining options.
-
-## Layout
-
-```
-config.py            models, benchmark settings and paths
-llm_client.py        retrying OpenAI-compatible client (OpenAI / Gemini), token counts
-policy/
-  schema.py          policy data structures, JSON-Schema validation, tool-spec helpers
-  convert.py         official policy wire format <-> internal policy
-  generator.py       LLM calls: initial policy + policy updates (official prompts)
-  smt_check.py       Z3 narrowing-vs-expansion check (+ bounded probe fallback)
-  enforcer.py        runtime check of a tool call against the policy (paper Algorithm 2)
-agent/
-  baseline_runner.py AgentDojo's standard agent loop, no defense
-  progent_runner.py  same loop with ProgentInit + ProgentToolsExecutor around tool calls
-  llm.py, common.py  agent LLM element, shared run/log helpers
-  mock_llm.py        scripted agent + oracle policy LLM for offline tests
-asb/                 ASB adapter: data loader, environment, runner, mocks
-eval/
-  run_eval.py        AgentDojo experiment driver      run_eval_asb.py   ASB experiment driver
-  metrics.py         utility % / ASR % (+ Wilson CIs)  make_summary.py   builds results/summary.md
-tests/               offline tests; tests/_*.py are manual scripts that pytest does not collect
-results/             raw run logs (.jsonl) and console output
+# 2. run the three setups on those pairs
+python eval/run_eval.py --suite travel --pairs-file results/pairs_travel.json --phases attack --conditions no_defense progent progent_recheck --no-summary
 ```
 
-## How a Progent run works
+Use `--suite slack` the same way. The 30 Travel pairs cost about $8 for all three setups, mostly the `gpt-4o`
+policy calls. A run that already finished is skipped, so you can stop and restart safely.
 
-1. `ProgentInit` asks the policy LLM for a least-privilege policy from the tool schemas and the trusted user task.
-2. Each tool call goes through `ProgentToolsExecutor`. Forbid rules are checked before allow rules, and a call that
-   matches no rule is blocked. A blocked call returns an error to the agent, which can try something else
-   (`terminate_execution` rules abort the run instead).
-3. After each executor step the policy can be updated in two LLM calls: the first decides whether an update is needed
-   without seeing the tool result, and the second writes the new policy using it. Z3 classifies each update as
-   narrowing or expansion.
-4. Expansions are auto-approved (the paper's worst-case setting) unless `PROGENT_ONLY_ALLOW_NARROW=True`. The Z3 label
-   is logged and does not otherwise change a decision.
+## See results
 
-Everything the policy layer did (initial and final policy, every decision, every update with its Z3 verdict) is stored
-per run in the `progent` field of the JSONL logs.
+```bash
+python eval/metrics.py --log results/raw_logs_travel.jsonl
+python eval/metrics.py --log results/raw_logs_slack.jsonl
+```
+
+This prints utility and attack success (ASR) for each setup, with a breakdown per attack. Every run, with the full
+conversation and every Progent decision, is stored in those `.jsonl` files.
+
+## Results so far
+
+| | No defense | Progent | Progent + choice check |
+|---|---|---|---|
+| **Travel** (30 pairs): attack success | 11/30 | 9/30 | **4/30** |
+| Travel: user task done | 12/30 | 14/30 | 12/30 |
+| **Slack** (28 pairs): attack success | 11/28 | 0/28 | 0/28 |
+| Slack: user task done | 12/28 | 12/28 | 10/28 |
+
+On Travel, every attack that gets past Progent is the same kind: a fake review that makes the agent recommend one
+hotel. The choice check stops more than half of those. On Slack, Progent already blocks everything, and the check
+only costs a little utility.
+
+The Progent-only baseline on AgentDojo Banking and ASB is in `results/raw_logs.jsonl` and
+`results/raw_logs_asb.jsonl` (`python eval/run_eval.py` and `python eval/run_eval_asb.py`).
+
+## Files
+
+```
+policy/choice_check.py   the choice check (our method)
+policy/                  Progent: policy generation, Z3 update check, enforcement
+agent/progent_runner.py  the agent loop with Progent (and the choice check) around tool calls
+eval/run_eval.py         runs the experiments on AgentDojo
+eval/select_pairs.py     picks the (user task, attack) pairs
+eval/metrics.py          utility and attack success tables
+results/                 raw run logs
+tests/                   offline tests
+```
